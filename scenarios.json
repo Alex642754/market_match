@@ -1,0 +1,172 @@
+[
+  {
+    "name": "限价单：价格不交叉，双方都挂单等待",
+    "orders": [
+      {"id": 1, "user": 100, "side": "sell", "type": "limit", "price": "51000", "amount": "1"},
+      {"id": 2, "user": 101, "side": "buy", "type": "limit", "price": "50000", "amount": "1"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=1",
+      "taker #2 submitted unfilled=1"
+    ]
+  },
+  {
+    "name": "限价单回归：大买单吃 3 个卖单，残余挂单（第 3 层完成标志）",
+    "orders": [
+      {"id": 1, "user": 100, "side": "sell", "type": "limit", "price": "50000", "amount": "1"},
+      {"id": 2, "user": 101, "side": "sell", "type": "limit", "price": "50001", "amount": "1"},
+      {"id": 3, "user": 102, "side": "sell", "type": "limit", "price": "50002", "amount": "1"},
+      {"id": 10, "user": 200, "side": "buy", "type": "limit", "price": "50002", "amount": "5"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=1",
+      "taker #2 submitted unfilled=1",
+      "taker #3 submitted unfilled=1",
+      "maker #1 filled filled=1@50000",
+      "maker #2 filled filled=1@50001",
+      "maker #3 filled filled=1@50002",
+      "taker #10 partial-filled unfilled=2"
+    ]
+  },
+  {
+    "name": "限价单：量正好吃满，盘口清空",
+    "orders": [
+      {"id": 1, "user": 100, "side": "sell", "type": "limit", "price": "50000", "amount": "1"},
+      {"id": 2, "user": 101, "side": "sell", "type": "limit", "price": "50001", "amount": "1"},
+      {"id": 3, "user": 102, "side": "sell", "type": "limit", "price": "50002", "amount": "1"},
+      {"id": 10, "user": 200, "side": "buy", "type": "limit", "price": "50002", "amount": "3"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=1",
+      "taker #2 submitted unfilled=1",
+      "taker #3 submitted unfilled=1",
+      "maker #1 filled filled=1@50000",
+      "maker #2 filled filled=1@50001",
+      "maker #3 filled filled=1@50002",
+      "taker #10 filled unfilled=0"
+    ]
+  },
+  {
+    "name": "撤单：撤存在的单 → canceled；撤不存在的单 → failed",
+    "orders": [
+      {"id": 1, "user": 100, "side": "sell", "type": "limit", "price": "50000", "amount": "1"},
+      {"id": 1, "user": 100, "side": "buy", "type": "cancel"},
+      {"id": 99, "user": 100, "side": "buy", "type": "cancel"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=1",
+      "taker #1 canceled unfilled=1",
+      "taker #99 failed"
+    ]
+  },
+  {
+    "name": "撤单：撤一笔已部分成交的挂单 → partial-canceled",
+    "orders": [
+      {"id": 1, "user": 100, "side": "sell", "type": "limit", "price": "50000", "amount": "10"},
+      {"id": 2, "user": 101, "side": "buy", "type": "limit", "price": "50000", "amount": "4"},
+      {"id": 1, "user": 100, "side": "sell", "type": "cancel"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=10",
+      "maker #1 partial-filled filled=4@50000",
+      "taker #2 filled unfilled=0",
+      "taker #1 partial-canceled unfilled=6"
+    ]
+  },
+  {
+    "name": "市价卖：吃完两个买单，残余作废不挂单",
+    "orders": [
+      {"id": 1, "user": 100, "side": "buy", "type": "limit", "price": "100", "amount": "1"},
+      {"id": 2, "user": 101, "side": "buy", "type": "limit", "price": "102", "amount": "1"},
+      {"id": 10, "user": 200, "side": "sell", "type": "market", "amount": "2.5"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=1",
+      "taker #2 submitted unfilled=1",
+      "maker #2 filled filled=1@102",
+      "maker #1 filled filled=1@100",
+      "taker #10 partial-canceled unfilled=0.5"
+    ]
+  },
+  {
+    "name": "市价卖：正好吃满 → filled",
+    "orders": [
+      {"id": 1, "user": 100, "side": "buy", "type": "limit", "price": "100", "amount": "1"},
+      {"id": 2, "user": 101, "side": "buy", "type": "limit", "price": "102", "amount": "1"},
+      {"id": 10, "user": 200, "side": "sell", "type": "market", "amount": "2"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=1",
+      "taker #2 submitted unfilled=1",
+      "maker #2 filled filled=1@102",
+      "maker #1 filled filled=1@100",
+      "taker #10 filled unfilled=0"
+    ]
+  },
+  {
+    "name": "市价卖：盘口是空的，一口没吃 → canceled",
+    "orders": [
+      {"id": 10, "user": 200, "side": "sell", "type": "market", "amount": "1"}
+    ],
+    "expected": [
+      "taker #10 canceled unfilled=1"
+    ]
+  },
+  {
+    "name": "市价买：100 USDT 按卖一价 7 折算可买量（钱→币），粉尘触发 precision-canceled",
+    "orders": [
+      {"id": 1, "user": 100, "side": "sell", "type": "limit", "price": "7", "amount": "20"},
+      {"id": 10, "user": 200, "side": "buy", "type": "market", "amount": "100"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=20",
+      "maker #1 partial-filled filled=14.28571428@7",
+      "taker #10 precision-canceled unfilled=0.00000004"
+    ]
+  },
+  {
+    "name": "熔断：第二口价格超出首口价 ×(1±0.1)，剩余作废",
+    "orders": [
+      {"id": 1, "user": 100, "side": "buy", "type": "limit", "price": "100", "amount": "1"},
+      {"id": 2, "user": 101, "side": "buy", "type": "limit", "price": "120", "amount": "1"},
+      {"id": 3, "user": 102, "side": "buy", "type": "limit", "price": "90", "amount": "1"},
+      {"id": 9, "user": 200, "side": "sell", "type": "market", "amount": "5", "circuit-rate": "0.1"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=1",
+      "taker #2 submitted unfilled=1",
+      "taker #3 submitted unfilled=1",
+      "maker #2 filled filled=1@120",
+      "taker #9 circuit-canceled unfilled=4"
+    ]
+  },
+  {
+    "name": "FOK：流动性够 → 全部成交",
+    "orders": [
+      {"id": 1, "user": 100, "side": "sell", "type": "limit", "price": "100", "amount": "2"},
+      {"id": 2, "user": 101, "side": "sell", "type": "limit", "price": "101", "amount": "3"},
+      {"id": 10, "user": 200, "side": "buy", "type": "fok", "amount": "4"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=2",
+      "taker #2 submitted unfilled=3",
+      "maker #1 filled filled=2@100",
+      "maker #2 partial-filled filled=2@101",
+      "taker #10 filled unfilled=0"
+    ]
+  },
+  {
+    "name": "FOK：流动性不够 → 整单取消且不碰盘口（后续限价单还能吃到货）",
+    "orders": [
+      {"id": 1, "user": 100, "side": "sell", "type": "limit", "price": "100", "amount": "2"},
+      {"id": 10, "user": 200, "side": "buy", "type": "fok", "amount": "4"},
+      {"id": 11, "user": 201, "side": "buy", "type": "limit", "price": "100", "amount": "2"}
+    ],
+    "expected": [
+      "taker #1 submitted unfilled=2",
+      "taker #10 canceled unfilled=4",
+      "maker #1 filled filled=2@100",
+      "taker #11 filled unfilled=0"
+    ]
+  }
+]

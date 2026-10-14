@@ -3,53 +3,128 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/shopspring/decimal"
 )
 
-// 第 3 层完成标志场景：
-// 盘口 3 个卖单 → 大买单吃 3 口 → 残余 2 个挂进买盘
-func main() {
-	book := NewOrderBook()
+// ===== 场景用例结构 =====
+type scenarioOrder struct {
+	Id          int64  `json:"id"`
+	User        int64  `json:"user"`
+	Side        string `json:"side"` // "buy" / "sell"
+	Type        string `json:"type"` // "limit" / "market" / "fok" / "cancel"
+	Price       string `json:"price"`
+	Amount      string `json:"amount"`
+	CircuitRate string `json:"circuit-rate"`
+}
 
-	// 盘口先挂 3 个卖单（价格递增，各 1 个）
-	book.Enqueue(mkOrder(1, 1, 100, Sell, "50000", "1"))
-	book.Enqueue(mkOrder(2, 2, 101, Sell, "50001", "1"))
-	book.Enqueue(mkOrder(3, 3, 102, Sell, "50002", "1"))
+type scenario struct {
+	Name     string          `json:"name"`
+	Orders   []scenarioOrder `json:"orders"`
+	Expected []string        `json:"expected"`
+}
 
-	// 大买单来了：5 个 @ 50002
-	taker := mkOrder(4, 10, 200, Buy, "50002", "5")
-	price, results := book.matchLimit(taker)
-
-	mr := MatchResult{OrderId: taker.OrderId, Price: price, Items: results}
-	resultJSON, _ := json.MarshalIndent(mr, "", "  ")
-	fmt.Println("===== 撮合回执 =====")
-	fmt.Println(string(resultJSON))
-
-	fmt.Println("===== 最终盘口 =====")
-	fmt.Println("买盘：")
-	for _, v := range book.BuySet.Values() {
-		o := v.(*Order)
-		fmt.Printf("  #%d user%d @ %v 剩 %v [%s]\n", o.OrderId, o.UserId, o.Price, o.UnfilledAmount, o.State)
+// 回执 → 一行可读字符串，用来和 expected 逐条比对
+func itemStr(r *OrderResult) string {
+	s := fmt.Sprintf("%s #%d %s", r.Role, r.OrderId, r.State)
+	if r.FilledAmount != nil {
+		s += fmt.Sprintf(" filled=%v@%v", *r.FilledAmount, *r.Price)
 	}
-	fmt.Println("卖盘：")
-	for _, v := range book.SellSet.Values() {
-		o := v.(*Order)
-		fmt.Printf("  #%d user%d @ %v 剩 %v [%s]\n", o.OrderId, o.UserId, o.Price, o.UnfilledAmount, o.State)
+	if r.UnfilledAmount != nil {
+		s += fmt.Sprintf(" unfilled=%v", *r.UnfilledAmount)
+	}
+	return s
+}
+
+// JSON 订单 → Order
+func buildOrder(so scenarioOrder, seqId int64) *Order {
+	var side BuyOrSell
+	if so.Side == "sell" {
+		side = Sell
+	}
+	var typ OrderType
+	switch so.Type {
+	case "market":
+		typ = Market
+	case "fok":
+		typ = Fok
+	case "cancel":
+		typ = Cancel
+	default:
+		typ = Limit
+	}
+	price, _ := decimal.NewFromString(so.Price)
+	amount, _ := decimal.NewFromString(so.Amount)
+	circuitRate, _ := decimal.NewFromString(so.CircuitRate)
+
+	return &Order{
+		SeqId:          seqId,
+		UserId:         so.User,
+		OrderId:        so.Id,
+		Type:           typ,
+		BuyOrSell:      side,
+		State:          Submitted,
+		Price:          price,
+		CircuitRate:    circuitRate,
+		UnfilledAmount: amount,
 	}
 }
 
-// 小工具：少打点字。State 初始都是 Submitted
-func mkOrder(seqId, orderId, userId int64, side BuyOrSell, price, amount string) *Order {
-	p, _ := decimal.NewFromString(price)
-	a, _ := decimal.NewFromString(amount)
-	return &Order{
-		SeqId:          seqId,
-		UserId:         userId,
-		OrderId:        orderId,
-		BuyOrSell:      side,
-		State:          Submitted,
-		Price:          p,
-		UnfilledAmount: a,
+func main() {
+	data, err := os.ReadFile("scenarios.json")
+	if err != nil {
+		fmt.Println("读不到 scenarios.json:", err)
+		return
 	}
+	var scenarios []scenario
+	if err := json.Unmarshal(data, &scenarios); err != nil {
+		fmt.Println("scenarios.json 格式错误:", err)
+		return
+	}
+
+	pass, fail := 0, 0
+	for _, sc := range scenarios {
+		book := NewOrderBook()
+		var got []string
+		for i, so := range sc.Orders {
+			mr := book.match(buildOrder(so, int64(i)+1))
+			for _, r := range mr.Items {
+				got = append(got, itemStr(r))
+			}
+		}
+
+		ok := len(got) == len(sc.Expected)
+		if ok {
+			for i := range got {
+				if got[i] != sc.Expected[i] {
+					ok = false
+					break
+				}
+			}
+		}
+
+		if ok {
+			pass++
+			fmt.Printf("PASS  %s\n", sc.Name)
+		} else {
+			fail++
+			fmt.Printf("FAIL  %s\n", sc.Name)
+			for i := 0; i < len(got) || i < len(sc.Expected); i++ {
+				g, e := "<缺>", "<缺>"
+				if i < len(got) {
+					g = got[i]
+				}
+				if i < len(sc.Expected) {
+					e = sc.Expected[i]
+				}
+				mark := "  "
+				if g != e {
+					mark = "→"
+				}
+				fmt.Printf("      %s got: %-50s want: %s\n", mark, g, e)
+			}
+		}
+	}
+	fmt.Printf("\n%d 通过 / %d 失败\n", pass, fail)
 }
