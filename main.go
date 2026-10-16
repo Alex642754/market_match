@@ -93,21 +93,31 @@ func main() {
 	runService()
 }
 
-// 服务模式：生产者-消费者
+// 服务模式：两条流水线
+// ① 拉单器 → chan订单 → 撮合器（单线程碰盘口）
+// ② 撮合器 → chan结果 → 攒批器（批量落库，幂等）
 func runService() {
-	ch := make(chan *Order, 5000) // 传送带：缓冲 5000 削峰
+	orderCh := make(chan *Order, 5000)   // 传送带①：订单
+	resultCh := make(chan MatchResult, 5000) // 传送带②：撮合结果
 
-	// 生产者：拉单 goroutine（从 MySQL 表里轮询捞订单）
-	go GoPuller(getDSN(), tableName, ch, 1) // 断点从 1 开始：把表里所有历史单都吃进来
+	// 生产者①：拉单 goroutine（第 5 层）
+	go GoPuller(getDSN(), tableName, orderCh, 1)
 
-	// 消费者：撮合。main goroutine 亲自上场 —— 全进程只有这里碰盘口（单线程）
+	// 生产者②：攒批落库 goroutine（第 6 层）
+	// 90 条/批 + 1 秒超时；INSERT IGNORE 幂等防重（断点丢了重撮合也不脏表）
+	go GoPersist(getDSN(), resultCh, 90)
+
+	// 消费者①：撮合。main goroutine 亲自上场 —— 全进程只有这里碰盘口（单线程）
 	book := NewOrderBook()
-	fmt.Println("=== 撮合服务启动，等待订单（往表里 INSERT 试试）===")
-	for order := range ch {
+	fmt.Println("=== 撮合服务启动（已接落库），等待订单 ===")
+	for order := range orderCh {
 		mr := book.match(order)
+		// ① 保留打印（验证用）
 		for _, r := range mr.Items {
 			fmt.Println(itemStr(r))
 		}
+		// ② 丢上传送带②，撮合节奏不被数据库拖累
+		resultCh <- mr
 	}
 }
 

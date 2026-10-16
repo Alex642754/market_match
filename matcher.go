@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/shopspring/decimal"
 )
 
@@ -20,25 +22,32 @@ type OrderResult struct {
 // 一次撮合的完整回执。items 里 taker 是最后一条，前面每条是一个 maker；
 // 下游都按 Role 字段区分角色，不按下标
 type MatchResult struct {
+	Id      int64           `json:"f-id"`  // ★ 第 6 层新增：确定性主键 = taker SeqId，重撮合也不变
+	Ts      int64           `json:"ts"`    // ★ 第 6 层新增：毫秒时间戳，落库用
 	OrderId int64           `json:"order-id"`
 	Price   decimal.Decimal `json:"price"` // 本轮最后一次成交价（maker 定价）
 	Items   []*OrderResult  `json:"items"`
 }
 
 // ===== 分诊台：所有订单的唯一入口，按类型分发 =====
+// ★ 统一在出口填 Id / Ts：Id = 输入 SeqId（确定性！重撮合也不变，幂等落库的前提）
 func (book *OrderBook) match(order *Order) MatchResult {
+	var mr MatchResult
 	switch order.Type {
 	case Cancel:
-		return book.matchCancel(order)
+		mr = book.matchCancel(order)
 	case Fok:
-		return book.matchFok(order)
+		mr = book.matchFok(order)
 	case Market:
 		price, items := book.matchMarket(order)
-		return MatchResult{OrderId: order.OrderId, Price: price, Items: items}
+		mr = MatchResult{OrderId: order.OrderId, Price: price, Items: items}
 	default: // Limit
 		price, items := book.matchLimit(order)
-		return MatchResult{OrderId: order.OrderId, Price: price, Items: items}
+		mr = MatchResult{OrderId: order.OrderId, Price: price, Items: items}
 	}
+	mr.Id = order.SeqId              // 确定性 f_id
+	mr.Ts = time.Now().UnixMilli()   // 落库时间戳（非确定性，只用于排序/查询）
+	return mr
 }
 
 // 价格交叉判断：买价 >= 卖价（或卖价 <= 买价）才能成交（限价单专用）
