@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -93,31 +94,62 @@ func main() {
 	runService()
 }
 
-// 服务模式：两条流水线
+// 快照目录
+const snapshotDir = "./snapshots"
+
+// 服务模式：两条流水线 + 定时快照
 // ① 拉单器 → chan订单 → 撮合器（单线程碰盘口）
 // ② 撮合器 → chan结果 → 攒批器（批量落库，幂等）
+// ③ 定时 → 写快照（第 7 层，kill -9 后能恢复）
 func runService() {
-	orderCh := make(chan *Order, 5000)   // 传送带①：订单
-	resultCh := make(chan MatchResult, 5000) // 传送带②：撮合结果
+	// ★ 启动时先找最新快照，恢复盘口和断点
+	book, savedFromId := LoadSnapshot(snapshotDir)
+	pullFromId := savedFromId + 1 // 从快照断点的下一条开始拉（快照里的已撮合过）
 
-	// 生产者①：拉单 goroutine（第 5 层）
-	go GoPuller(getDSN(), tableName, orderCh, 1)
+	orderCh := make(chan *Order, 5000)
+	resultCh := make(chan MatchResult, 5000)
 
-	// 生产者②：攒批落库 goroutine（第 6 层）
-	// 90 条/批 + 1 秒超时；INSERT IGNORE 幂等防重（断点丢了重撮合也不脏表）
+	// 生产者①：拉单 goroutine（断点从恢复值开始，没有快照就是 1）
+	go GoPuller(getDSN(), tableName, orderCh, pullFromId)
+
+	// 生产者②：攒批落库 goroutine
 	go GoPersist(getDSN(), resultCh, 90)
 
-	// 消费者①：撮合。main goroutine 亲自上场 —— 全进程只有这里碰盘口（单线程）
-	book := NewOrderBook()
-	fmt.Println("=== 撮合服务启动（已接落库），等待订单 ===")
-	for order := range orderCh {
-		mr := book.match(order)
-		// ① 保留打印（验证用）
-		for _, r := range mr.Items {
-			fmt.Println(itemStr(r))
+	// 生产者③：快照 goroutine（每 10 秒写一次）
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			// ★ 注意：这里 book 是指针，快照 goroutine 和撮合 goroutine 共享同一本
+			// 但快照只读 FromId / BuySet / SellSet / Cache，撮合器是唯一写者
+			// Go 的内存模型保证 channel 传递可见性，但这里我们用更安全的做法：
+			//   让撮合 goroutine 自己写快照（tick 时也能拿到正确数据）
+			// 所以这个 ticker 改成发送信号给撮合 goroutine
 		}
-		// ② 丢上传送带②，撮合节奏不被数据库拖累
-		resultCh <- mr
+	}()
+
+	// 更简单的做法：让撮合循环自己 tick（单线程写盘口，快照也在这里写）
+	snapshotTicker := time.NewTicker(10 * time.Second)
+	defer snapshotTicker.Stop()
+
+	fmt.Printf("=== 撮合服务启动（快照恢复 fromId=%d）===\n", savedFromId)
+	for {
+		select {
+		case order := <-orderCh:
+			// ★ 撮合器是唯一碰盘口的人（单线程），快照也必须在同一线程写
+			// 否则快照 goroutine 和撮合 goroutine 同时碰 OrderBook，锁的开销 + 竞态
+			mr := book.match(order)
+			book.FromId = order.SeqId // 撮合完更新断点
+			for _, r := range mr.Items {
+				fmt.Println(itemStr(r))
+			}
+			resultCh <- mr
+
+		case <-snapshotTicker.C:
+			// ★ 快照在撮合线程里写：不用锁，和撮合交替进行，天然正确
+			// 撮合完每 10 秒有一个"空闲窗口"，正好写快照
+			DumpSnapshot(book, snapshotDir)
+		}
 	}
 }
 
